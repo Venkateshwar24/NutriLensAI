@@ -10,7 +10,6 @@ import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.SamplerConfig
 import com.nutrilens.nutrilensai.Constants
 import com.nutrilens.nutrilensai.model.AnalysisResult
-import com.nutrilens.nutrilensai.util.AssetReader
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -46,22 +45,21 @@ class GemmaRepository(private val context: Context) {
         Timber.d("Model loaded successfully")
     }
 
-    fun analyzeStream(ingredients: String): Flow<String> = flow {
+    fun analyzeStream(ingredients: String, healthSummary: String): Flow<String> = flow {
         val currentEngine = engineLock.withLock { engine } ?: error("Model not loaded")
-        // Truncate to ~375 tokens to stay within the model's context window
-        val healthReport = AssetReader.readHealthReport(context).take(1500)
 
         val systemInstruction = """
-You are a clinical nutrition AI. Given a patient's health report and food ingredients, decide if the food is safe.
-Rules: high sugar->flag if HbA1c>=6.5% or pre-diabetes; high sodium->flag if BP>130/80; high sat-fat->flag if LDL high; high-purine foods->flag if uric acid high; allergens->always avoid.
+You are a clinical nutrition AI. Analyze the food ingredients against the patient's health profile and give a safety verdict using your full nutritional knowledge.
+Prioritize flagging: excess sugar/refined carbs for diabetics or pre-diabetics; high sodium for hypertension; saturated fat for high LDL; high-purine foods for high uric acid; known allergens. For ingredients outside these priorities, apply your general knowledge of nutrition and health impacts.
+Always give a verdict based on what you know — never say the data is insufficient or rules don't apply.
 Respond ONLY in this exact format, no extra text:
 VERDICT: [SAFE / CAUTION / AVOID]
-REASON: [2-3 sentences naming the patient's specific condition and the specific ingredient or nutrient of concern]
+REASON: [2-3 sentences explaining the key nutritional concern or why the food is safe for this patient]
         """.trimIndent()
 
         val userMessage = """
 PATIENT HEALTH PROFILE:
-$healthReport
+$healthSummary
 
 PRODUCT INGREDIENTS:
 $ingredients
@@ -78,21 +76,24 @@ $ingredients
         }
     }.flowOn(Dispatchers.IO)
 
-    fun analyzeImageStream(imagePath: String): Flow<String> = flow {
+    fun analyzeImageStream(imagePath: String, healthSummary: String): Flow<String> = flow {
         val currentEngine = engineLock.withLock { engine } ?: error("Model not loaded")
-        val healthReport = AssetReader.readHealthReport(context).take(1500)
 
         val systemInstruction = """
-You are a clinical nutrition AI. Look at the food label image and decide if this food is safe for the patient.
-Rules: high sugar->flag if HbA1c>=6.5% or pre-diabetes; high sodium->flag if BP>130/80; high sat-fat->flag if LDL high; high-purine foods->flag if uric acid high; allergens->always avoid.
+You are a clinical nutrition AI. Analyze the food label image for this patient using the following steps:
+1. Try to read ingredients and nutrition facts from the image.
+2. If ingredients are found, analyze them against the patient's health profile.
+3. If no ingredient list is visible but you can identify the food or product, use your general nutritional knowledge about it to give a verdict.
+4. Only if you cannot identify any food, product, or ingredients at all (blurry, not food-related, obscured), respond with VERDICT: RESCAN.
+Prioritize flagging: excess sugar/refined carbs for diabetics; high sodium for hypertension; saturated fat for high LDL; high-purine foods for high uric acid; known allergens. For anything else, apply general nutrition knowledge.
 Respond ONLY in this exact format, no extra text:
-VERDICT: [SAFE / CAUTION / AVOID]
-REASON: [2-3 sentences naming the patient's specific condition and the specific ingredient or nutrient of concern]
+VERDICT: [SAFE / CAUTION / AVOID / RESCAN]
+REASON: [2-3 sentences. For RESCAN: briefly explain what was unclear and give one practical tip for a better scan.]
         """.trimIndent()
 
         val userText = """
 PATIENT HEALTH PROFILE:
-$healthReport
+$healthSummary
 
 Read the ingredients and nutrition facts from the food label in the image, then analyze whether this product is safe for the patient above.
         """.trimIndent()
@@ -109,6 +110,30 @@ Read the ingredients and nutrition facts from the food label in the image, then 
         }
     }.flowOn(Dispatchers.IO)
 
+    fun summarizeReportStream(rawText: String): Flow<String> = flow {
+        val currentEngine = engineLock.withLock { engine } ?: error("Model not loaded")
+
+        val systemInstruction = """
+You are a medical data extractor. Read the health report and output a compact patient profile for food safety analysis.
+Output ONLY this structure, no extra text:
+PATIENT: [age]y [sex] BMI:[value]
+ABNORMAL: [param=value pairs, e.g. LDL=136,TG=210,BP=146/92,HbA1c=5.0,UricAcid=6.4,eGFR=68,VitD=21]
+RESTRICTIONS: [comma-separated flags from: HIGH_SODIUM,HIGH_SAT_FAT,HIGH_SUGAR,HIGH_PURINE,NUT_ALLERGY,NONE]
+NOTES: [one sentence on the most critical dietary concern, or NONE]
+        """.trimIndent()
+
+        val conversationConfig = ConversationConfig(
+            systemInstruction = Contents.of(systemInstruction),
+            samplerConfig = SamplerConfig(topK = 40, topP = 0.95, temperature = 0.2)
+        )
+
+        currentEngine.createConversation(conversationConfig).use { conversation ->
+            conversation.sendMessageAsync(
+                "HEALTH REPORT:\n${rawText.take(Constants.HEALTH_REPORT_RAW_TEXT_LIMIT)}"
+            ).collect { chunk -> emit(chunk.toString()) }
+        }
+    }.flowOn(Dispatchers.IO)
+
     fun parseResponse(response: String): AnalysisResult {
         val verdictLine = response.lines().firstOrNull { it.startsWith("VERDICT:") }
         val reasonLine = response.lines().firstOrNull { it.startsWith("REASON:") }
@@ -117,9 +142,10 @@ Read the ingredients and nutrition facts from the food label in the image, then 
             ?.uppercase()
             ?.let {
                 when {
-                    it.contains("SAFE") -> "SAFE"
-                    it.contains("AVOID") -> "AVOID"
-                    else -> "CAUTION"
+                    it.contains("RESCAN") -> "RESCAN"
+                    it.contains("SAFE")   -> "SAFE"
+                    it.contains("AVOID")  -> "AVOID"
+                    else                  -> "CAUTION"
                 }
             } ?: "CAUTION"
 

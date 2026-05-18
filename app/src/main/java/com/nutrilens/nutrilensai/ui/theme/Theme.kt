@@ -8,28 +8,28 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
 private val LightColorScheme = lightColorScheme(
-    primary             = NutriGreen,
+    primary             = NutriPrimary,
     onPrimary           = Color.White,
-    primaryContainer    = NutriGreenLight,
-    onPrimaryContainer  = NutriGreenDark,
-    secondary           = NutriGreenAccent,
+    primaryContainer    = NutriPrimaryLight,
+    onPrimaryContainer  = NutriPrimaryDark,
+    secondary           = NutriPrimaryAccent,
     onSecondary         = Color.White,
     background          = NutriBackground,
     onBackground        = NutriTextPrimary,
     surface             = NutriSurface,
     onSurface           = NutriTextPrimary,
-    surfaceVariant      = NutriGreenLight,
+    surfaceVariant      = NutriPrimaryLight,
     onSurfaceVariant    = NutriTextSecondary,
     outline             = NutriDivider,
     outlineVariant      = Color(0xFFCBD5E1),
 )
 
 private val DarkColorScheme = darkColorScheme(
-    primary             = NutriGreenAccent,
+    primary             = NutriPrimaryAccent,
     onPrimary           = Color(0xFF1E1B4B),
-    primaryContainer    = NutriGreenDark,
-    onPrimaryContainer  = NutriGreenLight,
-    secondary           = NutriGreen,
+    primaryContainer    = NutriPrimaryDark,
+    onPrimaryContainer  = NutriPrimaryLight,
+    secondary           = NutriPrimary,
     background          = Color(0xFF0F172A),
     onBackground        = Color(0xFFF1F5F9),
     surface             = Color(0xFF1E293B),
