@@ -46,13 +46,15 @@ class GemmaRepository(private val context: Context) {
 
     fun analyzeStream(ingredients: String): Flow<String> = flow {
         val currentEngine = engineLock.withLock { engine } ?: error("Model not loaded")
-        val healthReport = AssetReader.readHealthReport(context)
+        // Truncate to ~375 tokens to stay within the model's context window
+        val healthReport = AssetReader.readHealthReport(context).take(1500)
 
         val systemInstruction = """
-You are a clinical nutritionist AI. Given a patient's health profile and a food product's ingredient list, determine if it is safe for the patient to consume.
-Respond in this EXACT format with no extra text:
+You are a clinical nutrition AI. Given a patient's health report and food ingredients, decide if the food is safe.
+Rules: high sugar->flag if HbA1c>=6.5% or pre-diabetes; high sodium->flag if BP>130/80; high sat-fat->flag if LDL high; high-purine foods->flag if uric acid high; allergens->always avoid.
+Respond ONLY in this exact format, no extra text:
 VERDICT: [SAFE / CAUTION / AVOID]
-REASON: [2-3 sentences mentioning specific ingredients or nutrients of concern for this patient]
+REASON: [2-3 sentences naming the patient's specific condition and the specific ingredient or nutrient of concern]
         """.trimIndent()
 
         val userMessage = """
