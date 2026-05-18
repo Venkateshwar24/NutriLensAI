@@ -63,6 +63,27 @@ class AnalysisViewModel(application: Application) : AndroidViewModel(application
         _ocrState.value = OcrState.Idle
     }
 
+    fun analyzeFromImage(imagePath: String) {
+        if (!java.io.File(imagePath).exists()) {
+            _uiState.value = UiState.Error("Image file not found")
+            return
+        }
+        viewModelScope.launch {
+            _uiState.value = UiState.Analyzing
+            val accumulated = StringBuilder()
+            try {
+                repository.analyzeImageStream(imagePath).collect { chunk ->
+                    accumulated.append(chunk)
+                    _uiState.value = UiState.Streaming(accumulated.toString())
+                }
+                _uiState.value = UiState.Result(repository.parseResponse(accumulated.toString()))
+            } catch (e: Exception) {
+                Timber.e(e, "Image analysis failed")
+                _uiState.value = UiState.Error("Image analysis failed: ${e.message}")
+            }
+        }
+    }
+
     fun analyze(ingredients: String) {
         if (ingredients.isBlank()) {
             _uiState.value = UiState.Error("Please enter an ingredient list before analyzing.")

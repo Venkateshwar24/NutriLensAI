@@ -46,6 +46,7 @@ import com.nutrilens.nutrilensai.model.UiState
 import com.nutrilens.nutrilensai.ui.theme.*
 import com.nutrilens.nutrilensai.util.CameraHelper
 import com.nutrilens.nutrilensai.viewmodel.AnalysisViewModel
+import java.io.File
 
 // ─── Root Screen ──────────────────────────────────────────────────────────────
 
@@ -58,20 +59,23 @@ fun AnalysisScreen(viewModel: AnalysisViewModel = viewModel()) {
     val pagerState = rememberPagerState(initialPage = 0, pageCount = { 2 })
 
     var photoUri by remember { mutableStateOf<Uri?>(null) }
+    var photoFile by remember { mutableStateOf<File?>(null) }
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
-        if (success) photoUri?.let { viewModel.runOcr(it) }
+        if (success) photoFile?.let { viewModel.analyzeFromImage(it.absolutePath) }
     }
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {
-            val uri = CameraHelper.createPhotoUri(context)
+            val (uri, file) = CameraHelper.createPhotoUri(context)
             photoUri = uri
+            photoFile = file
             cameraLauncher.launch(uri)
         }
     }
     val onScanClick: () -> Unit = {
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-            val uri = CameraHelper.createPhotoUri(context)
+            val (uri, file) = CameraHelper.createPhotoUri(context)
             photoUri = uri
+            photoFile = file
             cameraLauncher.launch(uri)
         } else {
             permissionLauncher.launch(Manifest.permission.CAMERA)
@@ -93,10 +97,12 @@ fun AnalysisScreen(viewModel: AnalysisViewModel = viewModel()) {
         }
     }
 
-    // If model is missing on first launch, skip camera and show setup
+    // Navigate to analysis page when multimodal analysis starts, or if model is missing
     LaunchedEffect(uiState) {
-        if (uiState is UiState.ModelNotFound) {
-            pagerState.animateScrollToPage(1)
+        when (uiState) {
+            is UiState.ModelNotFound -> pagerState.animateScrollToPage(1)
+            is UiState.Analyzing    -> pagerState.animateScrollToPage(1)
+            else                    -> {}
         }
     }
 
@@ -105,7 +111,7 @@ fun AnalysisScreen(viewModel: AnalysisViewModel = viewModel()) {
         modifier = Modifier.fillMaxSize()
     ) { page ->
         when (page) {
-            0 -> CameraPage(ocrState = ocrState, onCapture = onScanClick)
+            0 -> CameraPage(uiState = uiState, ocrState = ocrState, onCapture = onScanClick)
             else -> AnalysisPage(
                 uiState         = uiState,
                 ocrState        = ocrState,
@@ -125,7 +131,7 @@ fun AnalysisScreen(viewModel: AnalysisViewModel = viewModel()) {
 // ─── Camera Page (Page 0) ─────────────────────────────────────────────────────
 
 @Composable
-private fun CameraPage(ocrState: OcrState, onCapture: () -> Unit) {
+private fun CameraPage(uiState: UiState, ocrState: OcrState, onCapture: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -161,8 +167,22 @@ private fun CameraPage(ocrState: OcrState, onCapture: () -> Unit) {
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                when (ocrState) {
-                    is OcrState.Processing -> {
+                val isAnalyzing = uiState is UiState.Analyzing || uiState is UiState.Streaming
+                when {
+                    isAnalyzing -> {
+                        CircularProgressIndicator(
+                            modifier    = Modifier.size(34.dp),
+                            color       = NutriGreen,
+                            strokeWidth = 3.dp
+                        )
+                        Text("Analyzing label…", color = Color.White.copy(alpha = 0.65f), fontSize = 13.sp)
+                    }
+                    uiState is UiState.Result -> {
+                        Icon(Icons.Rounded.CheckCircle, null, tint = NutriSafe, modifier = Modifier.size(44.dp))
+                        Text("Analysis complete!", color = Color.White.copy(alpha = 0.8f), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Text("Swipe left to see result →", color = NutriGreen.copy(alpha = 0.9f), fontSize = 12.sp)
+                    }
+                    ocrState is OcrState.Processing -> {
                         CircularProgressIndicator(
                             modifier    = Modifier.size(34.dp),
                             color       = NutriGreen,
@@ -170,7 +190,7 @@ private fun CameraPage(ocrState: OcrState, onCapture: () -> Unit) {
                         )
                         Text("Reading label…", color = Color.White.copy(alpha = 0.65f), fontSize = 13.sp)
                     }
-                    is OcrState.Success -> {
+                    ocrState is OcrState.Success -> {
                         Icon(Icons.Rounded.CheckCircle, null, tint = NutriSafe, modifier = Modifier.size(44.dp))
                         Text("Text captured!", color = Color.White.copy(alpha = 0.8f), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                         Text("Swipe left to analyze →", color = NutriGreen.copy(alpha = 0.9f), fontSize = 12.sp)
@@ -200,7 +220,12 @@ private fun CameraPage(ocrState: OcrState, onCapture: () -> Unit) {
 
         // Shutter + page dots
         Spacer(Modifier.weight(1f))
-        ShutterButton(onClick = onCapture, enabled = ocrState !is OcrState.Processing)
+        ShutterButton(
+            onClick  = onCapture,
+            enabled  = ocrState !is OcrState.Processing &&
+                       uiState !is UiState.Analyzing &&
+                       uiState !is UiState.Streaming
+        )
         Spacer(Modifier.height(14.dp))
         Text("Tap to capture", color = Color.White.copy(alpha = 0.3f), fontSize = 12.sp)
         Spacer(Modifier.height(18.dp))

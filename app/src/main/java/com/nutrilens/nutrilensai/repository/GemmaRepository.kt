@@ -2,6 +2,7 @@ package com.nutrilens.nutrilensai.repository
 
 import android.content.Context
 import com.google.ai.edge.litertlm.Backend
+import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
@@ -33,7 +34,8 @@ class GemmaRepository(private val context: Context) {
         Timber.d("Loading model from: %s", modelFile().absolutePath)
         val config = EngineConfig(
             modelPath = modelFile().absolutePath,
-            backend = Backend.CPU()
+            backend = Backend.CPU(),
+            visionBackend = Backend.CPU()
         )
         val newEngine = Engine(config)
         newEngine.initialize()
@@ -73,6 +75,37 @@ $ingredients
         currentEngine.createConversation(conversationConfig).use { conversation ->
             conversation.sendMessageAsync(userMessage)
                 .collect { chunk -> emit(chunk.toString()) }
+        }
+    }.flowOn(Dispatchers.IO)
+
+    fun analyzeImageStream(imagePath: String): Flow<String> = flow {
+        val currentEngine = engineLock.withLock { engine } ?: error("Model not loaded")
+        val healthReport = AssetReader.readHealthReport(context).take(1500)
+
+        val systemInstruction = """
+You are a clinical nutrition AI. Look at the food label image and decide if this food is safe for the patient.
+Rules: high sugar->flag if HbA1c>=6.5% or pre-diabetes; high sodium->flag if BP>130/80; high sat-fat->flag if LDL high; high-purine foods->flag if uric acid high; allergens->always avoid.
+Respond ONLY in this exact format, no extra text:
+VERDICT: [SAFE / CAUTION / AVOID]
+REASON: [2-3 sentences naming the patient's specific condition and the specific ingredient or nutrient of concern]
+        """.trimIndent()
+
+        val userText = """
+PATIENT HEALTH PROFILE:
+$healthReport
+
+Read the ingredients and nutrition facts from the food label in the image, then analyze whether this product is safe for the patient above.
+        """.trimIndent()
+
+        val conversationConfig = ConversationConfig(
+            systemInstruction = Contents.of(systemInstruction),
+            samplerConfig = SamplerConfig(topK = 40, topP = 0.95, temperature = 0.8)
+        )
+
+        currentEngine.createConversation(conversationConfig).use { conversation ->
+            conversation.sendMessageAsync(
+                Contents.of(Content.ImageFile(imagePath), Content.Text(userText))
+            ).collect { chunk -> emit(chunk.toString()) }
         }
     }.flowOn(Dispatchers.IO)
 
