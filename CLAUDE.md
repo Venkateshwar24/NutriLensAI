@@ -20,38 +20,65 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 # Push Gemma model to device (required before first run)
 adb push gemma-4-E2B-it.litertlm \
   /sdcard/Android/data/com.nutrilens.nutrilensai/files/gemma-4-E2B-it.litertlm
-```
 
-There are no unit tests yet (the test directories exist but are empty stubs). Run `./gradlew lint` for static analysis.
+# Static analysis (no unit tests exist yet)
+./gradlew lint
+```
 
 ## Architecture
 
-MVVM with a single screen. The full data path is:
+MVVM with a single `AnalysisScreen` backed by `AnalysisViewModel`. The full dependency graph:
 
 ```
-AnalysisScreen (Compose)
+AnalysisScreen (HorizontalPager — page 0: camera, page 1: analysis)
     └── AnalysisViewModel (AndroidViewModel)
-            ├── GemmaRepository   — LiteRT-LM engine, prompt builder, response parser
-            ├── OcrHelper         — ML Kit text recognition (suspend fun)
-            └── AssetReader       — reads sample_health_report.txt from assets
+            ├── GemmaRepository      — LiteRT-LM engine, all three inference flows
+            ├── HealthReportDatabase — Room singleton (via NutriLensApplication)
+            ├── OcrHelper            — ML Kit text recognition (suspend fun)
+            └── DocumentReader       — PDF + TXT extraction (suspend fun, PdfBox)
 ```
 
-**State model** — two independent StateFlows drive the UI:
-- `uiState: StateFlow<UiState>` — covers the full analysis lifecycle: `ModelNotFound → ModelLoading → Ready → Analyzing → Streaming(partialResponse) → Result(analysisResult) | Error(errorMessage)`
-- `ocrState: StateFlow<OcrState>` — `Idle → Processing → Success(extractedText) | Error(errorMessage)`
+**State model** — three independent `StateFlow`s drive the UI, all exposed via `.asStateFlow()`:
 
-Both sealed classes live in `model/` (`UiState.kt`, `OcrState.kt`) annotated `@Immutable`. `AnalysisResult(verdict, explanation)` is in `model/AnalysisResult.kt`.
+| Flow | Sealed class | States |
+|---|---|---|
+| `uiState` | `UiState` | `ModelNotFound → ModelLoading → Ready → Analyzing → Streaming(partialResponse) → Result(analysisResult) \| Error` |
+| `ocrState` | `OcrState` | `Idle → Processing → Success(extractedText) \| Error` |
+| `reportState` | `ReportState` | `NoReport → Extracting → Summarizing(partialSummary) → Loaded(fileName, summary, uploadedAt) \| Error` |
 
-**AI inference** — `GemmaRepository` wraps the LiteRT-LM `Engine`. Key API details:
-- Engine init: `Engine(EngineConfig(modelPath, Backend.CPU())).initialize()`
-- Inference: `engine.createConversation(ConversationConfig(systemInstruction = Contents.of(str), samplerConfig = SamplerConfig(topK, topP: Double, temperature: Double)))`
-- Streaming: `conversation.sendMessageAsync(msg).collect { chunk -> emit(chunk.toString()) }` — returns a `Flow<String>`
-- `analyzeStream()` returns `Flow<String>` using `flow { }.flowOn(Dispatchers.IO)`; the ViewModel accumulates chunks into a `StringBuilder` and emits `UiState.Streaming` on each token
-- Engine access is protected by a `Mutex` (`engineLock`) to guard concurrent load/read
+All sealed classes live in `model/` and are annotated `@Immutable`. Singleton subclasses use `data object`.
 
-**Constants** — all magic strings (model filename, FileProvider authority suffix, asset filename) are in `Constants.kt`. Never hardcode them in other files.
+**Two analysis paths** both funnel through `AnalysisViewModel`:
+1. **Vision path** — `analyzeFromImage(imagePath)` → `GemmaRepository.analyzeImageStream()` — the raw JPEG is passed directly to the multimodal model; OCR is skipped entirely.
+2. **Text path** — `analyze(ingredients)` → `GemmaRepository.analyzeStream()` — typed or OCR-extracted text is sent as a prompt.
 
-**Camera** — uses `ActivityResultContracts.TakePicture` (system camera, no CameraX). `CameraHelper.createPhotoUri()` in `util/` creates the temp file and returns a FileProvider URI. The FileProvider authority is `${packageName}.fileprovider`.
+Both paths call `resolveHealthSummary()` first, which reads the stored `summary` column from Room (falls back to a generic nutrition guideline string if no report is uploaded).
+
+**AI inference** — `GemmaRepository` wraps the LiteRT-LM `Engine`. Three flows:
+- `analyzeImageStream(imagePath, healthSummary)` — vision + health safety verdict
+- `analyzeStream(ingredients, healthSummary)` — text ingredients safety verdict
+- `summarizeReportStream(rawText)` — condenses an uploaded health report into the compact profile format used in prompts (`PATIENT / ABNORMAL / RESTRICTIONS / NOTES`)
+
+Key LiteRT-LM API pattern used throughout:
+```kotlin
+engine.createConversation(ConversationConfig(
+    systemInstruction = Contents.of(systemPrompt),
+    samplerConfig = SamplerConfig(topK, topP, temperature)
+)).use { conversation ->
+    conversation.sendMessageAsync(userMessage).collect { chunk -> emit(chunk.toString()) }
+}
+```
+Engine access is guarded by a `Mutex` (`engineLock`) to prevent concurrent load/read. All flows use `flowOn(Dispatchers.IO)`.
+
+**Health report persistence** — `data/db/` contains a Room database with a single-row table (`id = 1` always). The DAO exposes `observeReport(): Flow<HealthReportEntity?>`, `getReport()`, `saveReport()`, and `deleteReport()`. `HealthReportEntity` stores `fileName`, `rawText`, `summary`, and `uploadedAt`. On ViewModel init, `loadStoredReport()` restores the last uploaded report from the DB into `reportState`.
+
+**Document extraction** — `DocumentReader.extractText(uri, context)` detects MIME type and dispatches to PdfBox (PDF) or a buffered reader (TXT). Throws `DocumentReader.UnsupportedFormatException` for other types.
+
+**Constants** — all magic strings (model filename, FileProvider suffix, asset name, text limits) live in `Constants.kt`. Never hardcode them elsewhere.
+
+**Camera** — uses `ActivityResultContracts.TakePicture` (system camera, no CameraX). `CameraHelper.createPhotoUri()` creates a temp `.jpg` in `externalCacheDir` and returns a FileProvider URI. Authority: `${packageName}.fileprovider`.
+
+**Colors** — brand palette is `NutriPrimary` / `NutriPrimaryAccent` / `NutriPrimaryDark` / `NutriPrimaryLight` (indigo `#4F46E5` family). Verdict colors are `NutriSafe` (green), `NutriCaution` (amber), `NutriAvoid` (red). `AnalysisScreen.kt` defines its own private dark-mode surface constants (`ScreenBg`, `CardBg`, `CardBgHigh`, `BorderCol`, `TextPrimary`, `TextMuted`) — do not move them to `Color.kt`.
 
 **Timber** — initialized in `NutriLensApplication.onCreate()` (debug builds only). Use `Timber.d/e` everywhere instead of `Log`.
 
@@ -82,4 +109,8 @@ The model filename is defined in `Constants.MODEL_FILENAME`. If the model is ren
 
 ## Health Report
 
-`app/src/main/assets/sample_health_report.txt` is a synthetic patient profile (Ananya Rao, 42F) with pre-diabetes, high triglycerides, elevated BP, reduced kidney function, and vitamin D deficiency. The entire file is injected verbatim into the LLM prompt as the patient context. Replace it to change the patient profile; the asset name is in `Constants.HEALTH_REPORT_ASSET_NAME`.
+There are two sources for the health profile used in prompts:
+
+1. **Built-in asset** — `app/src/main/assets/sample_health_report.txt` is a synthetic patient profile (Ananya Rao, 42F) with pre-diabetes, high triglycerides, elevated BP, reduced kidney function, and vitamin D deficiency. Used as a fallback only if no user report is stored. Asset name is in `Constants.HEALTH_REPORT_ASSET_NAME`.
+
+2. **User-uploaded report** — any PDF or TXT file the user picks via the health report bottom sheet. `DocumentReader` extracts the raw text; `GemmaRepository.summarizeReportStream()` condenses it to ≤ `Constants.HEALTH_REPORT_SUMMARY_LIMIT` chars; the result is persisted in Room. `resolveHealthSummary()` in the ViewModel reads from Room first, falling back to the generic string if the table is empty. The built-in asset is **not** used once a user report is stored.
